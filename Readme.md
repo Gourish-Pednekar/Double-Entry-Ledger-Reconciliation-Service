@@ -21,15 +21,15 @@ Work in progress. The sections below describe what is implemented today; the roa
 
 ## Tech stack
 
-| Area | Choice |
-|---|---|
-| Language | Java 21 |
-| Framework | Spring Boot 4 (Web, Data JPA, Validation, Actuator) |
-| Database | PostgreSQL 16 |
-| Data access | Spring Data JPA for simple CRUD, JdbcClient with raw SQL for ledger queries |
-| Migrations | Flyway |
-| Local infrastructure | Docker Compose |
-| Testing (planned) | JUnit 5, Testcontainers |
+| Area                 | Choice                                                                      |
+| -------------------- | --------------------------------------------------------------------------- |
+| Language             | Java 21                                                                     |
+| Framework            | Spring Boot 4 (Web, Data JPA, Validation, Actuator)                         |
+| Database             | PostgreSQL 16                                                               |
+| Data access          | Spring Data JPA for simple CRUD, JdbcClient with raw SQL for ledger queries |
+| Migrations           | Flyway                                                                      |
+| Local infrastructure | Docker Compose                                                              |
+| Testing              | JUnit 5, AssertJ, Testcontainers (PostgreSQL 16)                            |
 
 ## Data model
 
@@ -43,13 +43,13 @@ Account types: `ASSET`, `LIABILITY`, `EQUITY`, `REVENUE`, `EXPENSE`.
 
 ### Database-level guarantees
 
-| Rule | Mechanism |
-|---|---|
+| Rule                                 | Mechanism                                                       |
+| ------------------------------------ | --------------------------------------------------------------- |
 | Debits equal credits per transaction | Deferred constraint trigger on `entries`, evaluated at `COMMIT` |
-| At least two entries per transaction | Same trigger |
-| Amounts are positive | `CHECK (amount > 0)` |
-| Ledger rows are immutable | `BEFORE UPDATE OR DELETE` triggers that raise an exception |
-| One transaction per idempotency key | `UNIQUE` constraint on `transactions.idempotency_key` |
+| At least two entries per transaction | Same trigger                                                    |
+| Amounts are positive                 | `CHECK (amount > 0)`                                            |
+| Ledger rows are immutable            | `BEFORE UPDATE OR DELETE` triggers that raise an exception      |
+| One transaction per idempotency key  | `UNIQUE` constraint on `transactions.idempotency_key`           |
 
 Example of the balance rule in action:
 
@@ -61,12 +61,12 @@ ERROR:  Transaction 2 is unbalanced: debits=500.0000 credits=400.0000
 
 ### Accounts
 
-| Method | Path | Description |
-|---|---|---|
-| POST | `/api/accounts` | Create an account (201, or 409 if the code already exists) |
-| GET | `/api/accounts` | List accounts |
-| GET | `/api/accounts/{id}` | Get one account (404 if unknown) |
-| GET | `/api/accounts/{id}/balance` | Total debits, total credits, and balance |
+| Method | Path                         | Description                                                |
+| ------ | ---------------------------- | ---------------------------------------------------------- |
+| POST   | `/api/accounts`              | Create an account (201, or 409 if the code already exists) |
+| GET    | `/api/accounts`              | List accounts                                              |
+| GET    | `/api/accounts/{id}`         | Get one account (404 if unknown)                           |
+| GET    | `/api/accounts/{id}/balance` | Total debits, total credits, and balance                   |
 
 Balance sign convention: asset and expense accounts are debit-normal (balance = debits - credits); liability, equity, and revenue accounts are credit-normal (balance = credits - debits).
 
@@ -78,20 +78,20 @@ Balance sign convention: asset and expense accounts are debit-normal (balance = 
 {
   "description": "Owner invests 1000",
   "entries": [
-    { "accountId": 1, "direction": "DEBIT",  "amount": 1000.00 },
-    { "accountId": 2, "direction": "CREDIT", "amount": 1000.00 }
+    { "accountId": 1, "direction": "DEBIT", "amount": 1000.0 },
+    { "accountId": 2, "direction": "CREDIT", "amount": 1000.0 }
   ]
 }
 ```
 
-| Situation | Response |
-|---|---|
-| New key, valid and balanced request | 201 Created with the transaction |
-| Same key, same body (a retry) | 200 OK with the original transaction and an `Idempotent-Replayed: true` header; nothing new is written |
-| Same key, different body | 422 Unprocessable Content |
-| Debits do not equal credits | 422 Unprocessable Content |
-| Unknown account | 404 Not Found |
-| Malformed request | 400 Bad Request |
+| Situation                           | Response                                                                                               |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| New key, valid and balanced request | 201 Created with the transaction                                                                       |
+| Same key, same body (a retry)       | 200 OK with the original transaction and an `Idempotent-Replayed: true` header; nothing new is written |
+| Same key, different body            | 422 Unprocessable Content                                                                              |
+| Debits do not equal credits         | 422 Unprocessable Content                                                                              |
+| Unknown account                     | 404 Not Found                                                                                          |
+| Malformed request                   | 400 Bad Request                                                                                        |
 
 #### How idempotency works
 
@@ -147,14 +147,34 @@ docker compose down -v
 docker compose up -d
 ```
 
+## Testing
+
+Integration tests run against a real PostgreSQL container started by Testcontainers, so triggers, constraints, and locking behave exactly as in production. Docker must be running.
+
+```bash
+./mvnw test
+```
+
+### Concurrency test
+
+`ConcurrentTransfersTest` creates a cash account and ten customer wallets, funds each wallet, then fires 6,000 requests from 32 threads at once. These are 3,000 random wallet-to-wallet transfers, each submitted twice with the same idempotency key at the same moment, in shuffled order. It asserts that:
+
+- no request fails
+- each unique key created exactly one transaction, and each duplicate was replayed
+- the transactions table contains only the funding transactions plus the 3,000 unique transfers
+- total debits equal total credits across the whole ledger
+- the total money held in wallets is unchanged by the transfers
+
+The test runs the service layer directly, which exercises the real database transaction and idempotency logic without HTTP overhead.
+
 ## Migrations
 
-| Version | Purpose |
-|---|---|
-| V1 | Accounts table |
-| V2 | Transactions and entries, balance trigger, append-only triggers |
-| V3 | Change `accounts.currency` to `VARCHAR(3)` to match the JPA mapping |
-| V4 | Add `transactions.request_hash` for idempotency checks |
+| Version | Purpose                                                             |
+| ------- | ------------------------------------------------------------------- |
+| V1      | Accounts table                                                      |
+| V2      | Transactions and entries, balance trigger, append-only triggers     |
+| V3      | Change `accounts.currency` to `VARCHAR(3)` to match the JPA mapping |
+| V4      | Add `transactions.request_hash` for idempotency checks              |
 
 ## Roadmap
 
@@ -165,14 +185,16 @@ docker compose up -d
 - [x] Account REST API
 - [x] Transaction endpoint with idempotency keys
 - [x] Account balance endpoint
-- [ ] Concurrency control and a parallel-transfer correctness test
+- [x] Parallel-transfer correctness test with duplicate idempotency keys
+- [ ] Overdraft prevention with ordered row locking, and deadlock handling
 - [ ] Running balances (window functions)
 - [ ] Hierarchical chart of accounts (recursive CTE)
 - [ ] Monthly statements (CTEs)
 - [ ] Multi-currency support with FX conversion (LATERAL join)
 - [ ] Bank statement reconciliation (FULL OUTER JOIN)
 - [ ] Performance work with EXPLAIN ANALYZE (partial indexes, partitioning, materialized views)
-- [ ] Integration tests with Testcontainers
+- [x] Integration test infrastructure with Testcontainers
+- [ ] Broader integration tests (API status codes, trigger behavior)
 - [ ] API documentation with Swagger UI
 - [ ] Dockerfile and deployment
 
@@ -182,5 +204,6 @@ docker compose up -d
 src/main/java/com/gourish/ledger/account      accounts and balances
 src/main/java/com/gourish/ledger/transaction  transaction posting and idempotency
 src/main/resources/db/migration               Flyway migrations
+src/test/java/com/gourish/ledger              integration and concurrency tests
 docker-compose.yml                            local PostgreSQL
 ```

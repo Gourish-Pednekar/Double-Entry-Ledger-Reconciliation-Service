@@ -13,9 +13,11 @@ import jakarta.validation.Valid;
 public class AccountController {
 
     private final AccountService service;
+    private final BalanceService balanceService;
 
-    public AccountController(AccountService service) {
+    public AccountController(AccountService service, BalanceService balanceService) {
         this.service = service;
+        this.balanceService = balanceService;
     }
 
     @PostMapping
@@ -32,5 +34,10 @@ public class AccountController {
     @GetMapping("/{id}")
     public AccountResponse get(@PathVariable Long id) {
         return service.get(id);
+    }
+
+    @GetMapping("/{id}/balance")
+    public BalanceResponse balance(@PathVariable Long id) {
+        return balanceService.balanceOf(id);
     }
 }

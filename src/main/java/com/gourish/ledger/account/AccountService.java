@@ -22,9 +22,8 @@ public class AccountService {
         if (req.parentId() != null && !repo.existsById(req.parentId())) {
             throw new AccountNotFoundException(req.parentId());
         }
-        Account saved = repo.saveAndFlush(
-                new Account(req.code(), req.name(), req.type(), req.currency(), req.parentId()));
-        return AccountResponse.from(repo.findById(saved.getId()).orElseThrow());
+        return AccountResponse.from(repo.saveAndFlush(
+                new Account(req.code(), req.name(), req.type(), req.currency(), req.parentId())));
     }
 
     @Transactional(readOnly = true)

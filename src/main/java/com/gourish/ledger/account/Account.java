@@ -3,6 +3,8 @@ package com.gourish.ledger.account;
 import java.time.Instant;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.Generated;
+import org.hibernate.generator.EventType;
 
 @Entity
 @Table(name = "accounts")
@@ -28,6 +30,7 @@ public class Account {
     @Column(name = "parent_id")
     private Long parentId;
 
+    @Generated(event = EventType.INSERT)
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
 

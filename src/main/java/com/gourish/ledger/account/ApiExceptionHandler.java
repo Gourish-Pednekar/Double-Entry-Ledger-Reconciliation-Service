@@ -4,6 +4,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import com.gourish.ledger.transaction.IdempotencyConflictException;
+import com.gourish.ledger.transaction.UnbalancedTransactionException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -16,5 +18,15 @@ public class ApiExceptionHandler {
     @ExceptionHandler(AccountNotFoundException.class)
     ProblemDetail notFound(AccountNotFoundException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
+    }
+
+    @ExceptionHandler(UnbalancedTransactionException.class)
+    ProblemDetail unbalanced(UnbalancedTransactionException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+    }
+
+    @ExceptionHandler(IdempotencyConflictException.class)
+    ProblemDetail idempotencyConflict(IdempotencyConflictException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
     }
 }

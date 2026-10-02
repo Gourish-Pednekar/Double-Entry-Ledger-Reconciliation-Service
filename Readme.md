@@ -2,7 +2,7 @@
 
 A double-entry ledger and reconciliation service built with Java 21, Spring Boot, and PostgreSQL.
 
-The goal of this project is to model how core financial systems keep money correct: every transaction is balanced, history is immutable, and the database itself enforces the rules so that no application bug can corrupt the books.
+The goal of this project is to model how core financial systems keep money correct: every transaction is balanced, history is immutable, retried payments never double-charge, and the database itself enforces the rules so that no application bug can corrupt the books.
 
 ## Status
 
@@ -12,7 +12,9 @@ Work in progress. The sections below describe what is implemented today; the roa
 
 - **Double-entry bookkeeping.** Every transaction consists of two or more entries, each a debit or a credit against an account. Total debits must equal total credits.
 - **The database enforces correctness.** Balance checks live in a deferred constraint trigger in PostgreSQL, not only in application code. Even a direct SQL insert cannot create an unbalanced transaction.
+- **Defense in depth.** The API validates the balance first so clients get a clear error, and the database trigger remains as the backstop.
 - **Append-only history.** Entries and transactions can never be updated or deleted. Mistakes are corrected by posting a new, reversing transaction, which preserves a full audit trail.
+- **Idempotent writes.** Every transaction is posted with an idempotency key, so a retried request cannot move money twice.
 - **Exact arithmetic.** Amounts are stored as `NUMERIC(19,4)`. Floating-point types are never used for money.
 - **UTC everywhere.** The application runs in UTC and timestamps are stored as `TIMESTAMPTZ`.
 - **Schema as code.** All schema changes are versioned Flyway migrations. Applied migrations are never edited.
@@ -24,6 +26,7 @@ Work in progress. The sections below describe what is implemented today; the roa
 | Language | Java 21 |
 | Framework | Spring Boot 4 (Web, Data JPA, Validation, Actuator) |
 | Database | PostgreSQL 16 |
+| Data access | Spring Data JPA for simple CRUD, JdbcClient with raw SQL for ledger queries |
 | Migrations | Flyway |
 | Local infrastructure | Docker Compose |
 | Testing (planned) | JUnit 5, Testcontainers |
@@ -32,7 +35,7 @@ Work in progress. The sections below describe what is implemented today; the roa
 
 ```
 accounts       id, code (unique), name, type, currency, parent_id, created_at
-transactions   id, idempotency_key (unique), description, created_at
+transactions   id, idempotency_key (unique), request_hash, description, created_at
 entries        id, transaction_id, account_id, direction (DEBIT | CREDIT), amount (> 0), created_at
 ```
 
@@ -46,12 +49,53 @@ Account types: `ASSET`, `LIABILITY`, `EQUITY`, `REVENUE`, `EXPENSE`.
 | At least two entries per transaction | Same trigger |
 | Amounts are positive | `CHECK (amount > 0)` |
 | Ledger rows are immutable | `BEFORE UPDATE OR DELETE` triggers that raise an exception |
+| One transaction per idempotency key | `UNIQUE` constraint on `transactions.idempotency_key` |
 
 Example of the balance rule in action:
 
 ```
 ERROR:  Transaction 2 is unbalanced: debits=500.0000 credits=400.0000
 ```
+
+## API
+
+### Accounts
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/accounts` | Create an account (201, or 409 if the code already exists) |
+| GET | `/api/accounts` | List accounts |
+| GET | `/api/accounts/{id}` | Get one account (404 if unknown) |
+| GET | `/api/accounts/{id}/balance` | Total debits, total credits, and balance |
+
+Balance sign convention: asset and expense accounts are debit-normal (balance = debits - credits); liability, equity, and revenue accounts are credit-normal (balance = credits - debits).
+
+### Transactions
+
+`POST /api/transactions` with an `Idempotency-Key` header (required, up to 64 characters).
+
+```json
+{
+  "description": "Owner invests 1000",
+  "entries": [
+    { "accountId": 1, "direction": "DEBIT",  "amount": 1000.00 },
+    { "accountId": 2, "direction": "CREDIT", "amount": 1000.00 }
+  ]
+}
+```
+
+| Situation | Response |
+|---|---|
+| New key, valid and balanced request | 201 Created with the transaction |
+| Same key, same body (a retry) | 200 OK with the original transaction and an `Idempotent-Replayed: true` header; nothing new is written |
+| Same key, different body | 422 Unprocessable Content |
+| Debits do not equal credits | 422 Unprocessable Content |
+| Unknown account | 404 Not Found |
+| Malformed request | 400 Bad Request |
+
+#### How idempotency works
+
+The service stores a SHA-256 hash of each request body next to its key. A repeated key with a matching hash is a genuine retry and replays the stored result. A repeated key with a different hash is a client bug and is rejected. If two identical requests arrive at the same moment, the unique constraint lets exactly one insert succeed; the other catches the duplicate-key error and replays the winner's result. The insert runs in its own database transaction so the loser can still query afterward.
 
 ## Getting started
 
@@ -76,7 +120,25 @@ Start the application (Flyway applies all migrations on startup):
 
 On Windows PowerShell, use `.\mvnw spring-boot:run`.
 
-The service listens on `http://localhost:8080`. Health check: `http://localhost:8080/actuator/health`.
+The service listens on `http://localhost:8080`.
+
+### Try it
+
+```powershell
+# Create accounts
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/accounts -ContentType "application/json" `
+  -Body '{"code":"1000","name":"Cash","type":"ASSET","currency":"INR"}'
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/accounts -ContentType "application/json" `
+  -Body '{"code":"3000","name":"Owner Equity","type":"EQUITY","currency":"INR"}'
+
+# Post a transaction (run it twice to see the idempotent replay)
+$body = '{"description":"Owner invests 1000","entries":[{"accountId":1,"direction":"DEBIT","amount":1000.00},{"accountId":2,"direction":"CREDIT","amount":1000.00}]}'
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/transactions -ContentType "application/json" `
+  -Headers @{"Idempotency-Key"="invest-001"} -Body $body
+
+# Check a balance
+Invoke-RestMethod http://localhost:8080/api/accounts/1/balance
+```
 
 ### Reset the local database
 
@@ -85,14 +147,24 @@ docker compose down -v
 docker compose up -d
 ```
 
+## Migrations
+
+| Version | Purpose |
+|---|---|
+| V1 | Accounts table |
+| V2 | Transactions and entries, balance trigger, append-only triggers |
+| V3 | Change `accounts.currency` to `VARCHAR(3)` to match the JPA mapping |
+| V4 | Add `transactions.request_hash` for idempotency checks |
+
 ## Roadmap
 
 - [x] Project setup, Docker Compose, Flyway
 - [x] Accounts, transactions, and entries schema
 - [x] Balance-enforcing constraint trigger
 - [x] Append-only enforcement
-- [ ] Account REST API
-- [ ] Transfer endpoint with idempotency keys
+- [x] Account REST API
+- [x] Transaction endpoint with idempotency keys
+- [x] Account balance endpoint
 - [ ] Concurrency control and a parallel-transfer correctness test
 - [ ] Running balances (window functions)
 - [ ] Hierarchical chart of accounts (recursive CTE)
@@ -107,7 +179,8 @@ docker compose up -d
 ## Project layout
 
 ```
-src/main/java/com/gourish/ledger     application code
-src/main/resources/db/migration      Flyway migrations (V1, V2, ...)
-docker-compose.yml                   local PostgreSQL
+src/main/java/com/gourish/ledger/account      accounts and balances
+src/main/java/com/gourish/ledger/transaction  transaction posting and idempotency
+src/main/resources/db/migration               Flyway migrations
+docker-compose.yml                            local PostgreSQL
 ```

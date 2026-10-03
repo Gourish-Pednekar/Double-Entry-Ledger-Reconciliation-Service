@@ -34,4 +34,9 @@ public class ApiExceptionHandler {
     ProblemDetail insufficientFunds(InsufficientFundsException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
     }
+
+    @ExceptionHandler(InvalidHierarchyException.class)
+    ProblemDetail invalidHierarchy(InvalidHierarchyException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+    }
 }

@@ -14,13 +14,19 @@ public class AccountService {
         this.repo = repo;
     }
 
-    @Transactional
+        @Transactional
     public AccountResponse create(CreateAccountRequest req) {
         if (repo.existsByCode(req.code())) {
             throw new DuplicateAccountException(req.code());
         }
-        if (req.parentId() != null && !repo.existsById(req.parentId())) {
-            throw new AccountNotFoundException(req.parentId());
+        if (req.parentId() != null) {
+            Account parent = repo.findById(req.parentId())
+                    .orElseThrow(() -> new AccountNotFoundException(req.parentId()));
+            if (parent.getType() != req.type() || !parent.getCurrency().equals(req.currency())) {
+                throw new InvalidHierarchyException(
+                        "A child account must have the same type and currency as its parent ("
+                                + parent.getType() + ", " + parent.getCurrency() + ")");
+            }
         }
         return AccountResponse.from(repo.saveAndFlush(
                 new Account(req.code(), req.name(), req.type(), req.currency(), req.parentId())));

@@ -17,12 +17,14 @@ public class AccountController {
     private final AccountService service;
     private final BalanceService balanceService;
     private final StatementService statementService;
+    private final ChartService chartService;
 
     public AccountController(AccountService service, BalanceService balanceService,
-                             StatementService statementService) {
+                             StatementService statementService, ChartService chartService) {
         this.service = service;
         this.balanceService = balanceService;
         this.statementService = statementService;
+        this.chartService = chartService;
     }
 
     @PostMapping
@@ -33,6 +35,9 @@ public class AccountController {
 
     @GetMapping
     public List<AccountResponse> list() { return service.list(); }
+
+    @GetMapping("/tree")
+    public List<AccountNode> tree() { return chartService.tree(); }
 
     @GetMapping("/{id}")
     public AccountResponse get(@PathVariable Long id) { return service.get(id); }

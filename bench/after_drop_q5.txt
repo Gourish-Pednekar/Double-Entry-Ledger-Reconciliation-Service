@@ -1,0 +1,44 @@
+﻿                                   query                                   
+---------------------------------------------------------------------------
+ Q5: statement for December 2025 incl. opening balance, period-only window
+(1 row)
+
+                                                                                                 QUERY PLAN                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ WindowAgg  (cost=14324.58..15541.61 rows=8603 width=89) (actual time=41.426..47.819 rows=8389 loops=1)
+   Buffers: shared hit=4989 read=106
+   InitPlan 1 (returns $0)
+     ->  Aggregate  (cost=5554.38..5554.39 rows=1 width=32) (actual time=13.312..13.312 rows=1 loops=1)
+           Buffers: shared hit=754
+           ->  Index Only Scan using idx_entries_account_time on entries  (cost=0.42..4865.48 rows=91853 width=12) (actual time=0.031..7.200 rows=91611 loops=1)
+                 Index Cond: ((account_id = 1) AND (created_at < '2025-12-01 00:00:00+00'::timestamp with time zone))
+                 Heap Fetches: 0
+                 Buffers: shared hit=754
+   ->  Gather Merge  (cost=8770.18..9772.14 rows=8603 width=57) (actual time=28.092..30.234 rows=8389 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=4235 read=106
+         ->  Sort  (cost=7770.16..7779.12 rows=3585 width=57) (actual time=25.098..25.193 rows=2796 loops=3)
+               Sort Key: e.created_at, e.id
+               Sort Method: quicksort  Memory: 344kB
+               Buffers: shared hit=4235 read=106
+               Worker 0:  Sort Method: quicksort  Memory: 327kB
+               Worker 1:  Sort Method: quicksort  Memory: 340kB
+               ->  Parallel Hash Join  (cost=505.83..7558.50 rows=3585 width=57) (actual time=22.640..24.667 rows=2796 loops=3)
+                     Hash Cond: (t.id = e.transaction_id)
+                     Buffers: shared hit=4203 read=106
+                     ->  Parallel Seq Scan on transactions t  (cost=0.00..6250.33 rows=208333 width=29) (actual time=0.029..10.149 rows=166667 loops=3)
+                           Buffers: shared hit=4061 read=106
+                     ->  Parallel Hash  (cost=442.57..442.57 rows=5061 width=36) (actual time=0.639..0.640 rows=2796 loops=3)
+                           Buckets: 16384  Batches: 1  Memory Usage: 736kB
+                           Buffers: shared hit=76
+                           ->  Parallel Index Only Scan using idx_entries_account_time on entries e  (cost=0.42..442.57 rows=5061 width=36) (actual time=0.038..0.929 rows=8389 loops=1)
+                                 Index Cond: ((account_id = 1) AND (created_at >= '2025-12-01 00:00:00+00'::timestamp with time zone) AND (created_at < '2026-01-01 00:00:00+00'::timestamp with time zone))
+                                 Heap Fetches: 0
+                                 Buffers: shared hit=76
+ Planning:
+   Buffers: shared hit=246
+ Planning Time: 0.700 ms
+ Execution Time: 48.193 ms
+(35 rows)
+

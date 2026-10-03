@@ -9,6 +9,7 @@ import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -25,14 +26,15 @@ public class StatementService {
         this.jdbc = jdbc;
     }
 
-    @Transactional(readOnly = true)
+    // REPEATABLE_READ: the opening balance and the lines are two queries, and they must
+    // see the same snapshot or the running balance could disagree with the opening balance.
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public StatementResponse statement(Long id, LocalDate from, LocalDate to) {
         if (from.isAfter(to)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "'from' must not be after 'to'");
         }
         Account a = repo.findById(id).orElseThrow(() -> new AccountNotFoundException(id));
 
-        // Entries in this direction increase the balance; the other direction decreases it
         boolean debitNormal = a.getType() == AccountType.ASSET || a.getType() == AccountType.EXPENSE;
         String plus = debitNormal ? "DEBIT" : "CREDIT";
 
@@ -48,27 +50,19 @@ public class StatementService {
                 .param("plus", plus).param("id", id).param("start", start)
                 .query(BigDecimal.class).single();
 
-        // The window function runs over the account's FULL history (CTE "running");
-        // the date filter is applied afterwards so balances carry across periods.
-        // Ordering by (created_at, id) keeps this consistent with the opening balance above.
+        // The window function covers only the requested period; the opening balance is
+        // added to the running sum. Reads ~8k rows instead of the account's whole history.
         List<StatementLine> lines = jdbc.sql("""
-                WITH signed AS (
-                    SELECT e.id, e.transaction_id, t.description, e.created_at, e.direction, e.amount,
-                           CASE WHEN e.direction = :plus THEN e.amount ELSE -e.amount END AS delta
-                    FROM entries e
-                    JOIN transactions t ON t.id = e.transaction_id
-                    WHERE e.account_id = :id
-                ),
-                running AS (
-                    SELECT *, SUM(delta) OVER (ORDER BY created_at, id) AS balance_after
-                    FROM signed
-                )
-                SELECT id, transaction_id, description, created_at, direction, amount, balance_after
-                FROM running
-                WHERE created_at >= :start AND created_at < :end
-                ORDER BY created_at, id
+                SELECT e.id, e.transaction_id, t.description, e.created_at, e.direction, e.amount,
+                       :opening + SUM(CASE WHEN e.direction = :plus THEN e.amount ELSE -e.amount END)
+                           OVER (ORDER BY e.created_at, e.id) AS balance_after
+                FROM entries e
+                JOIN transactions t ON t.id = e.transaction_id
+                WHERE e.account_id = :id AND e.created_at >= :start AND e.created_at < :end
+                ORDER BY e.created_at, e.id
                 """)
-                .param("plus", plus).param("id", id).param("start", start).param("end", end)
+                .param("opening", opening).param("plus", plus).param("id", id)
+                .param("start", start).param("end", end)
                 .query((rs, n) -> new StatementLine(
                         rs.getLong("id"),
                         rs.getLong("transaction_id"),

@@ -1,0 +1,122 @@
+﻿              query              
+---------------------------------
+ Q1: balance, hot account (id 1)
+(1 row)
+
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=14048.31..14048.32 rows=1 width=64) (actual time=18.848..21.397 rows=1 loops=1)
+   Buffers: shared hit=9735
+   ->  Gather  (cost=14048.08..14048.29 rows=2 width=64) (actual time=18.725..21.389 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9735
+         ->  Partial Aggregate  (cost=13048.08..13048.09 rows=1 width=64) (actual time=17.017..17.018 rows=1 loops=3)
+               Buffers: shared hit=9735
+               ->  Parallel Bitmap Heap Scan on entries  (cost=2772.71..12635.02 rows=41305 width=12) (actual time=3.007..12.766 rows=33333 loops=3)
+                     Recheck Cond: (account_id = 1)
+                     Heap Blocks: exact=3119
+                     Buffers: shared hit=9735
+                     ->  Bitmap Index Scan on idx_entries_account  (cost=0.00..2747.92 rows=99133 width=0) (actual time=3.466..3.466 rows=100000 loops=1)
+                           Index Cond: (account_id = 1)
+                           Buffers: shared hit=389
+ Planning:
+   Buffers: shared hit=112
+ Planning Time: 0.260 ms
+ Execution Time: 21.442 ms
+(19 rows)
+
+                 query                 
+---------------------------------------
+ Q2: balance, typical account (id 500)
+(1 row)
+
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=2699.72..2699.73 rows=1 width=64) (actual time=0.942..0.943 rows=1 loops=1)
+   Buffers: shared hit=893
+   ->  Bitmap Heap Scan on entries  (cost=27.39..2690.73 rows=899 width=12) (actual time=0.142..0.847 rows=903 loops=1)
+         Recheck Cond: (account_id = 500)
+         Heap Blocks: exact=884
+         Buffers: shared hit=893
+         ->  Bitmap Index Scan on idx_entries_account  (cost=0.00..27.17 rows=899 width=0) (actual time=0.079..0.080 rows=903 loops=1)
+               Index Cond: (account_id = 500)
+               Buffers: shared hit=9
+ Planning Time: 0.092 ms
+ Execution Time: 0.978 ms
+(11 rows)
+
+                       query                        
+----------------------------------------------------
+ Q3: opening balance before 2025-12-01, hot account
+(1 row)
+
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=14020.33..14020.34 rows=1 width=32) (actual time=16.039..18.213 rows=1 loops=1)
+   Buffers: shared hit=9732
+   ->  Gather  (cost=14020.11..14020.32 rows=2 width=32) (actual time=15.922..18.204 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9732
+         ->  Partial Aggregate  (cost=13020.11..13020.12 rows=1 width=32) (actual time=13.893..13.894 rows=1 loops=3)
+               Buffers: shared hit=9732
+               ->  Parallel Bitmap Heap Scan on entries  (cost=2770.63..12736.22 rows=37852 width=12) (actual time=2.204..11.256 rows=30537 loops=3)
+                     Recheck Cond: (account_id = 1)
+                     Filter: (created_at < '2025-12-01 00:00:00+00'::timestamp with time zone)
+                     Rows Removed by Filter: 2796
+                     Heap Blocks: exact=3436
+                     Buffers: shared hit=9732
+                     ->  Bitmap Index Scan on idx_entries_account  (cost=0.00..2747.92 rows=99133 width=0) (actual time=3.074..3.074 rows=100000 loops=1)
+                           Index Cond: (account_id = 1)
+                           Buffers: shared hit=386
+ Planning:
+   Buffers: shared hit=3
+ Planning Time: 0.057 ms
+ Execution Time: 18.235 ms
+(21 rows)
+
+                       query                        
+----------------------------------------------------
+ Q4: statement lines for December 2025, hot account
+(1 row)
+
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on running  (cost=24519.38..39782.54 rows=8279 width=89) (actual time=116.330..122.269 rows=8389 loops=1)
+   Filter: ((running.created_at >= '2025-12-01 00:00:00+00'::timestamp with time zone) AND (running.created_at < '2026-01-01 00:00:00+00'::timestamp with time zone))
+   Rows Removed by Filter: 91611
+   Buffers: shared hit=13249 read=778
+   ->  WindowAgg  (cost=24519.38..38295.55 rows=99133 width=121) (actual time=68.285..118.761 rows=100000 loops=1)
+         Buffers: shared hit=13249 read=778
+         ->  Gather Merge  (cost=24519.38..36065.05 rows=99133 width=57) (actual time=68.271..80.537 rows=100000 loops=1)
+               Workers Planned: 2
+               Workers Launched: 2
+               Buffers: shared hit=13249 read=778
+               ->  Sort  (cost=23519.36..23622.62 rows=41305 width=57) (actual time=66.430..67.363 rows=33333 loops=3)
+                     Sort Key: e.created_at, e.id
+                     Sort Method: quicksort  Memory: 3730kB
+                     Buffers: shared hit=13249 read=778
+                     Worker 0:  Sort Method: quicksort  Memory: 3833kB
+                     Worker 1:  Sort Method: quicksort  Memory: 3548kB
+                     ->  Parallel Hash Join  (cost=13151.34..20352.50 rows=41305 width=57) (actual time=20.364..59.563 rows=33333 loops=3)
+                           Hash Cond: (t.id = e.transaction_id)
+                           Buffers: shared hit=13217 read=778
+                           ->  Parallel Seq Scan on transactions t  (cost=0.00..6250.33 rows=208333 width=29) (actual time=0.031..8.220 rows=166667 loops=3)
+                                 Buffers: shared hit=3389 read=778
+                           ->  Parallel Hash  (cost=12635.02..12635.02 rows=41305 width=36) (actual time=19.852..19.854 rows=33333 loops=3)
+                                 Buckets: 131072  Batches: 1  Memory Usage: 8096kB
+                                 Buffers: shared hit=9732
+                                 ->  Parallel Bitmap Heap Scan on entries e  (cost=2772.71..12635.02 rows=41305 width=36) (actual time=3.040..12.581 rows=33333 loops=3)
+                                       Recheck Cond: (account_id = 1)
+                                       Heap Blocks: exact=3982
+                                       Buffers: shared hit=9732
+                                       ->  Bitmap Index Scan on idx_entries_account  (cost=0.00..2747.92 rows=99133 width=0) (actual time=3.000..3.000 rows=100000 loops=1)
+                                             Index Cond: (account_id = 1)
+                                             Buffers: shared hit=386
+ Planning:
+   Buffers: shared hit=115
+ Planning Time: 0.277 ms
+ Execution Time: 122.682 ms
+(35 rows)
+

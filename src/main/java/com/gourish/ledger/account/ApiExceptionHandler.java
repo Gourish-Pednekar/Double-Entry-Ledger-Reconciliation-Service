@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import com.gourish.ledger.transaction.IdempotencyConflictException;
 import com.gourish.ledger.transaction.UnbalancedTransactionException;
-
+import com.gourish.ledger.transaction.InsufficientFundsException;
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
@@ -27,6 +27,11 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(IdempotencyConflictException.class)
     ProblemDetail idempotencyConflict(IdempotencyConflictException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
+    }
+
+    @ExceptionHandler(InsufficientFundsException.class)
+    ProblemDetail insufficientFunds(InsufficientFundsException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
     }
 }

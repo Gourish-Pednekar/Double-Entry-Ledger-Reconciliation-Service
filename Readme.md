@@ -4,6 +4,18 @@ A double-entry ledger and reconciliation service built with Java 21, Spring Boot
 
 The goal of this project is to model how core financial systems keep money correct: every transaction is balanced, history is immutable, retried payments never double-charge, concurrent transfers cannot overdraw an account, and the database itself enforces the rules so that no application bug can corrupt the books.
 
+## Live demo
+
+- API base URL: https://double-entry-ledger-reconciliation.onrender.com
+- Swagger UI: https://double-entry-ledger-reconciliation.onrender.com/swagger-ui/index.html
+
+Please read before using it:
+
+- This is a free-tier demo (Render free web service with a Neon free PostgreSQL database).
+- The first request after 15 minutes of inactivity can be slow. The free instance sleeps when idle, and one measured startup on it took about 2 minutes (116 seconds for the application to start). The database also scales to zero after 5 minutes idle, which adds a little more.
+- There is no authentication. Anyone with the URL can call the API.
+- Data is disposable and may be reset at any time. Do not enter real data.
+
 ## Status
 
 Work in progress. The sections below describe what is implemented and measured today; the roadmap at the end shows what is planned.
@@ -26,12 +38,14 @@ Work in progress. The sections below describe what is implemented and measured t
 | Area                 | Choice                                                                      |
 | -------------------- | --------------------------------------------------------------------------- |
 | Language             | Java 21                                                                     |
-| Framework            | Spring Boot 4 (Web, Data JPA, Validation, Actuator)                         |
-| Database             | PostgreSQL 16                                                               |
+| Framework            | Spring Boot 4.1 (Web, Data JPA, Validation, Actuator)                       |
+| Database             | PostgreSQL 16 locally and in tests; Neon (PostgreSQL 18) in the live demo   |
 | Data access          | Spring Data JPA for simple CRUD, JdbcClient with raw SQL for ledger queries |
 | Migrations           | Flyway                                                                      |
-| Local infrastructure | Docker Compose                                                              |
+| API documentation    | springdoc-openapi (Swagger UI)                                              |
+| Local infrastructure | Docker Compose (database and application)                                   |
 | Testing              | JUnit 5, AssertJ, Testcontainers (PostgreSQL 16)                            |
+| Hosting              | Render (Docker web service) and Neon, both free tiers                       |
 
 ## Data model
 
@@ -72,6 +86,8 @@ ERROR:  Transaction 2 is unbalanced: debits=500.0000 credits=400.0000
 | `idx_entries_account_time` | `account_id, created_at, id` INCLUDE `direction, amount, transaction_id` | Covering index for balances and statements (see Performance) |
 
 ## API
+
+Interactive documentation is available through Swagger UI at `/swagger-ui/index.html` (locally `http://localhost:8080/swagger-ui/index.html`, or the live demo link above).
 
 ### Accounts
 
@@ -160,7 +176,7 @@ A statement with one correct line, one line that is 50.00 short, and one bank fe
 | `bank-fee-001` | `MISSING_IN_LEDGER` | none    | -15.00  | -15.00     |
 | `TX#1`         | `MISSING_IN_BANK`   | 500.00  | none    | -500.00    |
 
-Totals: ledger 1750.00, bank 1185.00, difference -565.00 (the sum of the item differences). This was verified manually against a running instance; there is no automated test for reconciliation yet.
+Totals: ledger 1750.00, bank 1185.00, difference -565.00 (the sum of the item differences). This scenario was first verified manually against a running instance; reconciliation is also covered by `ReconciliationTest` (see Testing).
 
 ### Matching rules and limitations
 
@@ -232,11 +248,22 @@ After the covering index existed, the planner already chose it for every account
 
 Net index cost: **+25 MB**.
 
+### Step 4: write cost
+
+Every insert now maintains a larger index, so a bulk-insert benchmark was run before and after V5. Three runs each:
+
+| Bulk insert    | Run 1 | Run 2 | Run 3 |
+| -------------- | ----- | ----- | ----- |
+| Before V5 (ms) | 2075  | 2081  | 2147  |
+| After V5 (ms)  | 2146  | 2015  | 3637  |
+
+No measurable write penalty showed up in the first two runs after V5. The third run was slower (3637 ms). With only three runs per side, this benchmark cannot rule out a small penalty.
+
 ### What was not measured
 
-- **Write cost.** Every insert now maintains a larger index. The overdraft and concurrency tests still pass, but insert throughput was not benchmarked.
 - **End-to-end API latency.** The numbers above are database query times, not HTTP response times. The application runs the statement as two queries inside one transaction, so its latency will differ from the single combined benchmark query.
-- **Other hardware and cold caches.** These are single-machine, warm-cache, single-run figures. Treat them as order-of-magnitude evidence, not precise multipliers.
+- **Other hardware and cold caches.** These are single-machine, warm-cache figures from a small number of runs. Treat them as order-of-magnitude evidence, not precise multipliers.
+- **The live demo.** The deployed service runs on shared free-tier hardware with the database in a different container; none of the figures above were measured there.
 
 ### Known remaining cost
 
@@ -278,7 +305,7 @@ docker exec -i ledger-db psql -U ledger -d ledger_bench -f /tmp/queries.sql | Ou
 Start PostgreSQL:
 
 ```bash
-docker compose up -d
+docker compose up -d db
 ```
 
 Start the application (Flyway applies all migrations on startup):
@@ -290,6 +317,14 @@ Start the application (Flyway applies all migrations on startup):
 On Windows PowerShell, use `.\mvnw spring-boot:run`.
 
 The service listens on `http://localhost:8080`.
+
+### Run everything in Docker
+
+```bash
+docker compose up -d --build
+```
+
+This builds the application image from the multi-stage `Dockerfile` and starts it next to the database. Check `http://localhost:8080/actuator/health`.
 
 ### Try it
 
@@ -319,7 +354,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/accounts/1/bank-st
 Invoke-RestMethod http://localhost:8080/api/bank-statements/1/reconciliation
 ```
 
-The statement dates are UTC. Adjust them to include the day you ran the example.
+The statement dates are UTC. Adjust them to include the day you ran the example. The account ids above assume an empty database; against the live demo, use the ids returned when you create accounts.
 
 ### Reset the local database
 
@@ -327,6 +362,17 @@ The statement dates are UTC. Adjust them to include the day you ran the example.
 docker compose down -v
 docker compose up -d
 ```
+
+## Deployment
+
+The live demo runs as a Docker web service on Render (free instance, Singapore region) built from the repository's `Dockerfile`, with its database on Neon (free tier, AWS Singapore, direct connection without pooling).
+
+- **Configuration is environment-driven.** The datasource URL, username, and password are supplied as `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD`. No credentials are stored in the repository; the defaults in `application.yml` point at the local Docker database.
+- **Port and proxy.** The server port is read from `PORT` (default 8080), and `forward-headers-strategy: framework` makes the application respect the HTTPS headers set by Render's proxy.
+- **Memory.** The free instance has 512 MB of RAM, so the connection pool is capped with `SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=5` and the JVM runs with `-XX:MaxRAMPercentage=70 -XX:+UseSerialGC`.
+- **Health check.** Render checks `/actuator/health/liveness` (enabled with `MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED=true`). The liveness probe does not touch the database, so health checks do not wake the Neon database from idle.
+- **Migrations.** Flyway applies all migrations on startup, so the same code that runs locally creates the schema in the cloud database.
+- **Known limits.** Cold starts are slow on the 0.1 CPU free instance, and Swagger UI and the OpenAPI endpoints are left enabled because this is a demo.
 
 ## Testing
 
@@ -336,7 +382,7 @@ Integration tests run against a real PostgreSQL container started by Testcontain
 ./mvnw test
 ```
 
-Both concurrency tests clear the database before running.
+There are five tests: `ConcurrentTransfersTest`, `OverdraftConcurrencyTest`, `ReconciliationTest` (two tests), and `LedgerApplicationTests` (application context loads against a fresh database with all migrations). Both concurrency tests clear the database before running.
 
 ### Concurrency test
 
@@ -378,12 +424,10 @@ The test runs the service layer directly, which exercises the real database tran
 - [x] Hierarchical chart of accounts (recursive CTE)
 - [x] Benchmark with EXPLAIN ANALYZE: covering index and period-scoped statement query
 - [x] Bank statement import and reconciliation (FULL OUTER JOIN)
-- [ ] Multi-currency support with FX conversion (LATERAL join)
-- [ ] Partitioning, partial indexes, or materialized views, only if measurements justify them
-- [ ] Insert-throughput benchmark to quantify index write cost
-- [ ] Broader integration tests (reconciliation, API status codes, trigger behavior, statements, chart of accounts)
-- [ ] API documentation with Swagger UI
-- [ ] Dockerfile and deployment
+- [x] Insert-throughput benchmark to quantify index write cost
+- [x] API documentation with Swagger UI
+- [x] Dockerfile and Docker Compose for the application
+- [x] Cloud deployment (Render and Neon free tiers)
 
 ## Project layout
 
@@ -394,5 +438,6 @@ src/main/java/com/gourish/ledger/reconciliation  bank statement CSV import and r
 src/main/resources/db/migration               Flyway migrations
 src/test/java/com/gourish/ledger              integration and concurrency tests
 bench                                         benchmark seed, queries, and recorded results
-docker-compose.yml                            local PostgreSQL
+Dockerfile                                    multi-stage build for the application image
+docker-compose.yml                            local PostgreSQL and application
 ```

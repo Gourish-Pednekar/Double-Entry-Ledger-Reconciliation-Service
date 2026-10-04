@@ -39,6 +39,8 @@ Work in progress. The sections below describe what is implemented and measured t
 accounts       id, code (unique), name, type, currency, parent_id, created_at
 transactions   id, idempotency_key (unique), request_hash, description, created_at
 entries        id, transaction_id, account_id, direction (DEBIT | CREDIT), amount (> 0), created_at
+bank_statements id, account_id, imported_at
+bank_lines     id, statement_id, reference, booked_on, amount (signed, non-zero), description
 ```
 
 Account types: `ASSET`, `LIABILITY`, `EQUITY`, `REVENUE`, `EXPENSE`.
@@ -118,6 +120,54 @@ The service stores a SHA-256 hash of each request body next to its key. A repeat
 
 **Chart of accounts.** A recursive CTE builds every (ancestor, descendant) pair from `parent_id`, and each ancestor's rolled-up total is the sum of its descendants' own balances. The recursion has a depth guard so that a data error cannot cause an infinite loop. The nested structure is assembled in Java.
 
+## Bank reconciliation
+
+Import a bank statement as CSV, then compare it against the ledger. The comparison is a `FULL OUTER JOIN` between the ledger entries on the account and the imported bank lines, which keeps unmatched rows from both sides (an inner join would hide every discrepancy; a left join would see only one direction).
+
+| Method | Path                                       | Description                                                                                                              |
+| ------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| POST   | `/api/accounts/{id}/bank-statements`       | Import a statement. Body is raw CSV with `Content-Type: text/csv` (201; 400 for invalid CSV; 404 for an unknown account) |
+| GET    | `/api/bank-statements/{id}/reconciliation` | Reconcile an imported statement against the ledger (404 for an unknown statement)                                        |
+
+CSV format, with this exact header (the description may contain commas):
+
+```
+reference,date,amount,description
+invest-001,2026-10-02,1000.00,Deposit
+```
+
+A positive amount means the account's balance increased (a deposit into an asset account). Imports are validated completely before anything is written; a duplicate reference within one file, a malformed date or amount, or a wrong header is rejected with a 400 naming the line.
+
+Each item is classified as one of:
+
+| Status              | Meaning                                      |
+| ------------------- | -------------------------------------------- |
+| `MATCHED`           | Present on both sides with equal amounts     |
+| `AMOUNT_MISMATCH`   | Present on both sides with different amounts |
+| `MISSING_IN_BANK`   | In the ledger but not on the bank statement  |
+| `MISSING_IN_LEDGER` | On the bank statement but not in the ledger  |
+
+The response also includes a count per status, the ledger and bank totals, and the difference between them.
+
+### Example result
+
+A statement with one correct line, one line that is 50.00 short, and one bank fee the ledger does not know about, reconciled against an account whose ledger also holds a 500.00 initial deposit the statement omits:
+
+| Reference      | Status              | Ledger  | Bank    | Difference |
+| -------------- | ------------------- | ------- | ------- | ---------- |
+| `invest-001`   | `MATCHED`           | 1000.00 | 1000.00 | 0.00       |
+| `invest-002`   | `AMOUNT_MISMATCH`   | 250.00  | 200.00  | -50.00     |
+| `bank-fee-001` | `MISSING_IN_LEDGER` | none    | -15.00  | -15.00     |
+| `TX#1`         | `MISSING_IN_BANK`   | 500.00  | none    | -500.00    |
+
+Totals: ledger 1750.00, bank 1185.00, difference -565.00 (the sum of the item differences). This was verified manually against a running instance; there is no automated test for reconciliation yet.
+
+### Matching rules and limitations
+
+- **Matching key.** A bank line's `reference` is matched to the ledger transaction's idempotency key. Ledger transactions without a key appear as `TX#<id>` so they are still reported. Real bank data is often less clean, and fuzzy matching on amount and date is not implemented.
+- **Date window.** The ledger side is limited to the date range covered by the bank lines, using UTC dates. A payment booked on one day by the ledger and the next day by the bank can appear as a false discrepancy; the statement should cover a period wide enough to absorb timing differences.
+- **One line per reference.** Ledger entries are summed per transaction, and bank references must be unique within a statement.
+
 ## Concurrency control
 
 The overdraft rule is checked in application code: read the account balance, compare it with the requested debit, then insert the entries. Written naively, this has a race condition. Two transfers debiting the same wallet at the same moment both read the same balance, both decide they can afford it, and both commit.
@@ -135,7 +185,7 @@ Before checking balances, each transaction locks every account it touches with `
 - Concurrent transfers that touch the same account queue up instead of reading the same stale balance. Under PostgreSQL's default `READ COMMITTED` isolation, the balance query that runs after the lock is granted sees the previous transfer's committed entries.
 - Locking in a fixed order prevents deadlocks. If one transfer locked wallet 1 then 2 while another locked 2 then 1, each would wait on the other. With sorted locking, both go for the lower id first, so one waits and no cycle can form.
 
-With the fix, four recorded runs of the same test produced 1,613, 1,670, 1,717, and 1,704 successful transfers, with the remainder rejected for insufficient funds. In every run there was no overdrawn wallet, no unexpected error (no deadlocks), and the total money across the wallets was unchanged.
+With the fix, five recorded runs of the same test produced 1,613, 1,670, 1,717, 1,704, and 1,641 successful transfers, with the remainder rejected for insufficient funds. In every run there was no overdrawn wallet, no unexpected error (no deadlocks), and the total money across the wallets was unchanged.
 
 ### Scope and limitations
 
@@ -200,9 +250,13 @@ The scripts are in the `bench` folder. They use `docker cp` and `psql -f` rather
 # 1. Copy the development schema into a separate benchmark database (stop the app first)
 docker exec -i ledger-db psql -U ledger -d postgres -c "CREATE DATABASE ledger_bench TEMPLATE ledger;"
 
-# 2. Seed 1M entries, then verify and refresh statistics (see the commands in bench/seed.sql comments)
+# 2. Seed 1M entries
 docker cp bench\seed.sql ledger-db:/tmp/seed.sql
 docker exec -i ledger-db psql -v ON_ERROR_STOP=1 -U ledger -d ledger_bench -f /tmp/seed.sql
+
+# 2b. Verify the seed (expect 0 unbalanced transactions) and refresh planner statistics
+docker exec -i ledger-db psql -U ledger -d ledger_bench -c "SELECT COUNT(*) AS unbalanced FROM (SELECT transaction_id FROM entries GROUP BY transaction_id HAVING COUNT(*) < 2 OR SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END) <> 0) x;"
+docker exec -i ledger-db psql -U ledger -d ledger_bench -c "VACUUM ANALYZE entries;"
 
 # 3. Run the benchmark queries twice and keep the second run
 docker cp bench\queries.sql ledger-db:/tmp/queries.sql
@@ -255,6 +309,14 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/transactions -Cont
 Invoke-RestMethod http://localhost:8080/api/accounts/1/balance
 Invoke-RestMethod "http://localhost:8080/api/accounts/1/statement?from=2026-01-01&to=2026-12-31"
 Invoke-RestMethod http://localhost:8080/api/accounts/tree
+
+# Import a bank statement for account 1 and reconcile it
+$csv = @"
+reference,date,amount,description
+invest-001,2026-10-02,1000.00,Deposit
+"@
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/accounts/1/bank-statements -ContentType "text/csv" -Body $csv
+Invoke-RestMethod http://localhost:8080/api/bank-statements/1/reconciliation
 ```
 
 The statement dates are UTC. Adjust them to include the day you ran the example.
@@ -299,6 +361,7 @@ The test runs the service layer directly, which exercises the real database tran
 | V3      | Change `accounts.currency` to `VARCHAR(3)` to match the JPA mapping                            |
 | V4      | Add `transactions.request_hash` for idempotency checks                                         |
 | V5      | Add the covering index `idx_entries_account_time` and drop the redundant `idx_entries_account` |
+| V6      | Bank statements and bank lines for reconciliation                                              |
 
 ## Roadmap
 
@@ -314,11 +377,11 @@ The test runs the service layer directly, which exercises the real database tran
 - [x] Account statements with running balances (window functions)
 - [x] Hierarchical chart of accounts (recursive CTE)
 - [x] Benchmark with EXPLAIN ANALYZE: covering index and period-scoped statement query
-- [ ] Bank statement reconciliation (FULL OUTER JOIN)
+- [x] Bank statement import and reconciliation (FULL OUTER JOIN)
 - [ ] Multi-currency support with FX conversion (LATERAL join)
 - [ ] Partitioning, partial indexes, or materialized views, only if measurements justify them
 - [ ] Insert-throughput benchmark to quantify index write cost
-- [ ] Broader integration tests (API status codes, trigger behavior, statements, chart of accounts)
+- [ ] Broader integration tests (reconciliation, API status codes, trigger behavior, statements, chart of accounts)
 - [ ] API documentation with Swagger UI
 - [ ] Dockerfile and deployment
 
@@ -327,6 +390,7 @@ The test runs the service layer directly, which exercises the real database tran
 ```
 src/main/java/com/gourish/ledger/account      accounts, balances, statements, chart of accounts
 src/main/java/com/gourish/ledger/transaction  transaction posting, idempotency, overdraft control
+src/main/java/com/gourish/ledger/reconciliation  bank statement CSV import and reconciliation
 src/main/resources/db/migration               Flyway migrations
 src/test/java/com/gourish/ledger              integration and concurrency tests
 bench                                         benchmark seed, queries, and recorded results
